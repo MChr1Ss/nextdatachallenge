@@ -1,0 +1,439 @@
+<html>
+	<head>
+		<title>Op-Verteilung v0.3</title>	
+		
+		<style>			
+			tr, td {
+				border-collapse: collapse;
+				border-spacing: 0;
+				margin: 0;
+				padding: 0;
+				border: 0;
+			}
+			
+			#dynamicTab > table {
+				border-collapse: seperate;
+				border-spacing: 1;
+				margin: 3;
+				padding: 3;
+				border: 1;
+			}
+			
+			
+			#dynamicTab > table tr {
+				padding: 5px;
+			}
+			
+			#dynamicTab > table tr:nth-child(even) {
+			  background-color: #d1d1d1;
+			}
+
+			#dynamicTab > table tr:nth-child(odd) {
+			  background-color: #e1e1e1;
+			}
+				
+			
+		</style>
+		<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script> 
+		<script src="https://momentjs.com/downloads/moment.js"></script> 
+
+		<script>			
+			var t0 = performance.now()
+		
+			/********************************************************
+			 * Erläuterungen zum Code:
+			 * 
+			 * !!!!!!!!!!!! Bei JSONurl, muss der Datensatz als JSON angegeben werden! Benutzte JS-Bibliotheken sind oben abgegeben!!!!!!!!!!!!!!
+			 * 
+			 * Die Laufzeiten wurden eine eine Minute gerundet. s/ms machten mMn in einer realen Umgebung wenig Sinn)
+			 * 
+			 * Der Code berechnet anhand des vorgegebenen Datensatzes einen Plan (gespeichert in realPlan), der die als erstes die Prioritäten (urgencyMapped) und dann das Eingangsdatum (regDate) betrachtet. Dauer ca. 2s. Mit einem potenteren Rechner und/oder einer Datenbank die hinterlegt wird, lässt sich sicherlich noch ein viel besseres Ergebnis erzielen.
+			 *
+			 * Der Workload jedes Arztes wird minimiert, da immer der Arzt zur OP herangezogen wird, der die wenigsten Ops gemacht hat. 
+			 * Die Raumauslastung wird maximiert, da anhand des Eingangsdatums und der Prio die meisten Ops gewählt werden die an einem Tag stattfinden können.
+			 * Kleinere Abfragen, z.B. dass ein Arzt nicht gleichzeitig in zwei verschiedenen Räumen sein kann, sind nicht implementiert, da die Zeit fehlte und bei der Anzahl der Ärzte aktuell auch nicht vorkommt 
+			 *
+			 * Da die Problemstellung leider nicht 100% definiert ist, mussten einige Annahmen gemacht werden. Die sind im Code teils selbsterklärend.
+			 * Es wurde angenommen, dass zwischen Ops eine Pause von 10 Minuten liegt.
+			 * Es wurde angenommen, dass für cleanessMapped je 5 Minuten mehr Vorbereitung/Nachbereitung gebraucht werden. Diese werden zur Laufzeit der OP addiert.
+			 *
+			 *
+			 *
+			 * Die Idee um Notfälle abzuarbeiten könnte folgendermaßen aussehen: (Nicht implementiert, dazu fehlte die Zeit und das Wissen der Betriebsumgebung)
+			 * - Ein Notfall kommt rein
+			 * - Finde einen freien Raum // Finde den Raum der als nächstes frei wird
+			 * - Dort wird der Notfall abgearbeitet
+			 * - Berechne die Endzeiten der laufenden Ops 
+			 * - Berechne mit den geplanten Ops und einer Methode ähnlich fitsInPlan einen neuen Plan
+			 * - Jetzt könnte man sagen 
+			 * -- Durch einen Notfall dürfen Überstunden gemacht werden, damit alle anderen geplanten Ops an dem Tag abgearbeitet werden können
+			 * -- Alle Ops die mehr an diesem Tag stattfinden können, werden zu dem nächsten Tag hinzugefügt und dort wird der Plan ausgerechnet, fallen dort Ops über die Zeit werden die zum nächsten Tag hinzugefügt und der Plan neuberechnet, usw.
+			 * -- Die Ops die nicht mehr stattfinden können, werden zurück zur prioList hinzugefügt und abgesagt und dann in Zukunft stattfinden
+			 *
+			 * Falls es Erfahrungswerte für Notfälle gibt (z.B. im Schnitt 37 Minuten werden für Notfälle gebraucht), dann könnte man den Plan dementsprechend vorher planen, dass solche Notfälle "eingeplant" werden und dann im Schnitt keine Überstunden gemacht werden. Dazu müsste man wissen, wie Notfälle definiert sind und so weiter.
+			 *
+			 * Verbesserungen:
+			 * - Die Prioritäten der einzelnen Ops sollte im Laufe der Zeit erhöht werden, bspw. Prio 2 nach 5 Tagen -> Prio 3, nach weiteren 4 Tagen Prio 4, etc.
+			 *   Damit Ops die eine sehr niedrige Prio haben auch noch abgearbeitet werden.
+			 *
+			 * - Die Idee für die Robustheit war: 
+			 * -- Notfälle werden wie im ersten Punkt oben abgearbeitet, dann werde nur Ops an einem Tag verschoben => Robustheit
+			 * -- Es wird immer ein Tag komplett geplant. D.h. es werden z.B. 5 Tage geplant, die sind fest. Der 6. Tag wird anhand der Prioliste / Regdate geplant, wenn der 1. Tag abgearbeitet ist. Dadurch erreicht man einen Robusten Plan für 5 Tage und die Ops mit den höchsten Prioritäten, die sich am frühsten gemeldet haben, werden bevorzugt behandelt. Dabei muss man schauen ob wie viele Tage es nun sein sollten.
+			 *
+			 *
+			 * Das Programm würde sich leicht anpassen lassen um fortlaufende Pläne neu zu berechnen. Dazu müsste man aber genau wissen, wann wie was neu berechnet werden soll und wie Robust der Plan sein soll.
+			 *
+			 *
+			 * Falls die Aufgabenstellung gänzlich falsch verstanden wurde (da die Laufzeit weit unter einer Stunde liegt) und dieser Code deshalb nicht gewertet wird, würde ich mich trotzdem über eine Erklärung der Problemstellung freuen: meyerchr@outlook.com 
+			 *
+			 *
+			 *
+			 ********************************************************/
+		
+			var JSONurl = "dataset/op_list.json";
+			
+			
+			// config variables
+			var timeBetweenOps = 10;
+			var offsetPerCleanessMapped = 5;
+			var maxRooms = 5;
+			var startWork = 8;
+			var endWork = 18;
+			var daysPerWeek = 5; // für spätere Implementierungen
+			var robustDays = 5;  // für spätere Implementierungen, z.B., dass 5 Tage "fest" geplant werden, und die danach "dynamisch"
+			
+			
+			var realPlan = [];
+			var tempPlan;
+			var dayCounter = 0;
+			
+			function SortByDuration(a, b){
+				return ((a.duration < b.duration) ? -1 : ((a.duration > b.duration) ? 1 : 0));
+			}
+			function SortByRegDate(a, b){
+				return ((a.regDate < b.regDate) ? -1 : ((a.regDate > b.regDate) ? 1 : 0));
+			}
+			
+			function indexOfSmallest(a) {
+				var lowest = 0;
+				for (var i = 1; i < a.length; i++) {
+					if (a[i] < a[lowest]) lowest = i;
+				}
+				return lowest;
+			}
+			
+			function indexOfBiggest(a) {
+				var biggest = 0;
+				for (var i = 1; i < a.length; i++) {
+					if (a[i] > a[biggest]) biggest = i;
+				}
+				return biggest;
+			}
+			
+			function fitsInPlan(Rooms, Docs, Ops){
+				var myOps = {};
+				myOps = clonedArray = JSON.parse(JSON.stringify(Ops))
+				if(myOps.length > 1)
+					myOps.sort(SortByDuration);
+				
+				var op;				
+				var RoomPlanTime = [];
+				var RoomPlan = [];
+				for(var i = 0; i < Rooms.length; i++){
+					RoomPlanTime[i] = 0;
+					RoomPlan[i] = [];
+				}
+				
+						
+				var DocPlanTime = [];
+				for(var i = 0; i < Docs.length; i++){
+					DocPlanTime[i] = 0;
+				}
+				
+				// check doc workload
+				for(var i = 0; i < dayCounter; i++){
+					for(var j = 0; j < realPlan[i].length; j++){
+						for(var k = 0; k < realPlan[i][j].length; k++){
+							DocPlanTime[realPlan[i][j][k].doc] += realPlan[i][j][k].duration; 
+						}
+					}
+				}
+				
+				var tempIndexRoom = -1;
+				var tempIndexDoc = -1;
+				while(myOps.length != 0){
+					op = myOps.pop();
+					tempIndexRoom = indexOfSmallest(RoomPlanTime);
+					RoomPlanTime[tempIndexRoom] += op.duration + timeBetweenOps;
+					RoomPlan[tempIndexRoom].push(op);	
+					
+					tempIndexDoc = indexOfSmallest(DocPlanTime);
+					op.doc = tempIndexDoc;
+					DocPlanTime[tempIndexDoc] += op.duration;				
+				}
+				
+				if(RoomPlanTime[indexOfBiggest(RoomPlanTime)] > (endWork-startWork) * 60){
+					//console.log(RoomPlanTime[indexOfBiggest(RoomPlanTime)]);
+					return false;
+				}
+								
+				return RoomPlan;			
+			}
+			
+			// Müsste noch implementiert werden für Notfälle
+			function findFreeRoom(Rooms, plannedOps){				
+				return Room;
+			}
+			
+			// Müsste noch implementiert werden für Notfälle
+			function findFreeDoc(Doc, plannedOps){				
+				return Doc;			
+			}	
+			
+			let json = {};
+			
+			$.ajax({
+			  url: JSONurl,
+			  async: false,
+			  dataType: 'json',
+			  success: function (response) {
+				json = response;
+				// console.log(response);
+				// do stuff with response.
+			  }
+			});
+			json.sort(SortByRegDate);
+			//console.log(json);
+			
+			
+			// extract variables
+			var Docs = [];	
+			var Rooms = [];	
+			var Cleaness = [];	
+			var Urgency = [];
+			var Ops = [];
+			var minReg = "2022-05-14T07:52:00.000Z";	
+			var maxReg = "2002-05-14T07:52:00.000Z";	
+			//var Mittel = 0;	
+			var skipDocs = false;
+			var skipRooms = false;
+			var skipCleaness = false;
+			var skipUrgency = false;
+			$.each( json, function( key, value ) {
+				skipDocs = false;
+				skipRooms = false;
+				skipCleaness = false;
+				skipUrgency = false;
+			
+				// Round To Minutes
+				value["tobetimes"].duration = parseInt(value["tobetimes"].duration / 60)+1 + value["cleanessMapped"] * offsetPerCleanessMapped;
+				
+				value["regDate"] = moment(value["regDate"]);
+				
+				//Mittel += value["tobetimes"].duration;
+			
+				if(minReg >= value["regDate"]){
+					minReg = value["regDate"]
+				}
+				
+				if(maxReg <= value["regDate"]){
+					maxReg = value["regDate"]
+				}
+			
+				// Gets Docs
+				$.each( Docs, function( key2, value2 ) {
+					if(value2 == value["regTeam"][0]["empId"]){
+						skipDocs = true;
+						return false;
+					}
+				});
+			
+				if (!skipDocs)
+					Docs.push(Number(value["regTeam"][0]["empId"]));
+	
+	
+	
+				// Get Rooms
+				$.each( Rooms, function( key2, value2 ) {
+					if(value2 == value["opRoom"]){
+						skipRooms = true;
+						return false;
+					}
+				});
+			
+				if (!skipRooms)
+					Rooms.push(value["opRoom"]);
+	
+	
+				// Get Cleaness
+				$.each( Cleaness, function( key2, value2 ) {
+					if(value2 == value["cleanessMapped"]){
+						skipCleaness = true;
+						return false;
+					}
+				});
+			
+				if (!skipCleaness)
+					Cleaness.push(value["cleanessMapped"]);
+					
+	
+				// Get Urgancy
+				$.each( Urgency, function( key2, value2 ) {
+					if(value2 == value["urgencyMapped"]){
+						skipUrgency = true;
+						return false;
+					}
+				});
+			
+				if (!skipUrgency)
+					Urgency.push(value["urgencyMapped"]);
+					
+					
+					
+					
+				// Get Ops	
+				Ops.push({		id: value["_id"], 
+								cleanessMapped: value["cleanessMapped"], 
+								urgencyMapped: value["urgencyMapped"], 
+								discipline: value["discipline"], 
+								personId: value["personId"], 
+								duration: value["tobetimes"].duration,
+								regDate: value["regDate"],
+								});	
+				
+			});
+			Docs.sort();
+			Rooms.sort();
+						
+			
+			// create prio list
+			var prioList = [];
+			for(var i = 0; i < 10; i++){			
+				prioList[i] = []			
+			}		
+	
+			var roomOccupiedTill = [];
+			for(var i = 0; i < Rooms.length; i++){			
+				roomOccupiedTill[i] = 0;			
+			}
+			
+			// Müsste noch implementiert werden, mit echten Zeiten für die Tage
+			var plannedOps = []; // Object with op, room, time, doc
+			var finishedOps = []; // Object with op, room, time, doc
+			
+			var wait = false;
+			var minRoomTime = 0;
+			
+			var actualDay = moment('2020-04-15');
+			var plannedTill = moment('2020-04-15');
+			
+			
+			for(var i = 0; i < Ops.length; i++){
+				wait = false;				
+				
+				prioList[Ops[i]["urgencyMapped"]].push(Ops[i]);
+				
+				// ######## Muss implementiert werden, falls man die Berechnung des Planes "Live" machen möchte. Ist aber keine große Anpassung
+				// remove all finishedOps, find next free room
+				/*for(var j = 0; j < plannedOps.length; j++){
+					if(moment(plannedOps[j]["start"]).add(plannedOps[j].op.duration, 'm').toDate() <= Ops.regDate){ // planned OP is finshed
+						// remove plannedOps from List and push to finished List						
+						finishedOps.push(plannedOps[j]);
+						plannedOps.splice(j,j);						
+						j--;
+					} else if(plannedOps[j]["start"] <= Ops.regDate && Ops.regDate < moment(plannedOps[j]["start"]).add(plannedOps[j].op.duration, 'm').toDate()){ // planned OP is running
+						wait = true;
+						roomOccupiedTill[plannedOps[j]["room"]]
+					} else if(Ops.regDate < plannedOps[j]["start"]){ // OP isnt started yet 
+						break;
+					}
+				}*/
+
+							
+			}
+			
+			var tempOps = [];
+			for(var j = prioList.length -1; j >=0; j--){
+				for(var k = 0; k < prioList[j].length; k++){
+					tempOps.push(prioList[j][k]);
+					tempPlan = fitsInPlan(Rooms,Docs, tempOps);
+					if(Array.isArray(tempPlan)){
+						realPlan[dayCounter] = tempPlan;
+					} else if (realPlan[0].length > 0){
+					
+						tempOps = [];
+						tempOps.push(prioList[j][k]);
+						dayCounter++;
+					}
+				}
+			}
+			
+							
+			$( document ).ready(function() {
+				
+				for(var k = 0; k < realPlan.length; k++){
+					var dayPlan = '<table border="1"><tr><td colspan="2" rowspan="1">' + " Tag " + k +  '</td></tr>';
+					dayPlan += '<tr><td width="200">Zeit</td><td width="1000">' + 
+					'<table border="0"><tr><td bgcolor="gray" width="' + (endWork - startWork) * 60 + '">' + startWork + ' - ' + endWork +    '</td></tr></table>' + 
+					'</td></tr>';
+					for(var i = 0; i < realPlan[k].length; i++){
+						var dayRoomPlan = '<table border="0"><tr>';
+						for(var j = 0; j < realPlan[k][i].length; j++){
+							var col = "";
+							switch(realPlan[k][i][j].urgencyMapped){
+								case 0:
+								case 1:
+									col = "lightgreen";									
+									break;
+								case 2:
+								case 3:
+									col = "darkgreen";									
+									break;
+									
+								case 4:								
+								case 5:
+									col = "orange";					
+									break;
+								case 6:
+									col = "orangered";	
+									break;
+									
+								case 7:
+								case 8:			
+								case 9:
+									col = "darkred";								
+									break;
+									
+								default:
+									col = "gray";
+									break;
+							}
+							
+							dayRoomPlan += '<td width="' + realPlan[k][i][j].duration + '" bgcolor="' + col +  '">D:' + realPlan[k][i][j].doc + '</td>';
+							if( j != realPlan[k][i].length-1){ // add pause
+								dayRoomPlan += '<td width="' + timeBetweenOps +  '" bgcolor="darkgray">&nbsp;</td>';
+							}
+						}
+						dayRoomPlan += '</tr></table>';
+					
+						dayPlan += '<tr><td width="200">' + Rooms[i] + '</td><td width="1000">' + dayRoomPlan + '</td></tr>';
+					}
+					dayPlan += '</table>';
+					$('#dynamicTab').append(dayPlan);				
+				}
+				
+				
+				var t1 = performance.now();
+				console.log("Runtime " + (t1 - t0) + " milliseconds.");			
+			});			
+			
+		</script>
+	
+	
+	</head>
+	
+	<body>
+		<h1>Plan: </h1>
+		<div id="dynamicTab"></div>
+	</body>
+</html>
